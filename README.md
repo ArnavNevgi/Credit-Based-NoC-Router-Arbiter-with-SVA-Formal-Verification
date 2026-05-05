@@ -132,3 +132,23 @@ Legal conditions include:
 - round-robin pointer remains inside the legal range
 
 The project intentionally describes these as bounded fairness checks, not complete unbounded starvation-freedom proofs. 
+
+## Phase 7 Cover Properties
+
+Added cover properties to demonstrate reachability of important arbitration and credit-flow scenarios.
+
+| Cover Group | Description |
+|---|---|
+| Per-port grant reachability | Covers grant occurrence for ports 0, 1, 2, and 3 |
+| Per-VC grant reachability | Covers grant/fire for VC0 and VC1 |
+| Back-to-back grants | Covers consecutive grant cycles |
+| Different-port rotation | Covers consecutive grants to different ports |
+| Credit depletion | Covers VC credit count reaching zero |
+| Credit return | Covers credit return events and return after depletion |
+| Same-cycle consume/return | Covers simultaneous grant/fire and credit return for the selected VC |
+| Backpressure blocking | Covers request with `out_ready` low and no grant |
+| Zero-credit blocking | Covers request with all credits depleted and no grant |
+| Mixed request patterns | Covers nontrivial request vectors such as `1010` and `0101` |
+| Priority pointer coverage | Covers all round-robin pointer values |
+| Pointer wraparound | Covers priority wrap from last port back to port 0 |
+| Reset recovery | Covers reset deassertion followed by a valid grant |

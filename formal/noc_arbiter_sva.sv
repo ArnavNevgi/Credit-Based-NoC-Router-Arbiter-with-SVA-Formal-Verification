@@ -422,36 +422,36 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // -------------------------------------------------------------------------
-    // Phase 6 cover sanity
-    // Detailed cover plan remains Phase 7.
+        // -------------------------------------------------------------------------
+    // Phase 7 cover properties
+    //
+    // These covers are used to demonstrate reachability of important arbitration,
+    // credit, reset, and backpressure scenarios. They are not safety proofs by
+    // themselves; they provide evidence that the formal environment can exercise
+    // meaningful design behavior.
     // -------------------------------------------------------------------------
 
+    // CV0: Environment can leave reset.
     always_ff @(posedge clk) begin
         cover(rst_n);
     end
 
-    always_ff @(posedge clk) begin
-        cover(rst_n && out_ready && (|req));
-    end
+    // CV1-CV4: Each port can receive a grant.
+    generate
+        genvar cover_port;
+        for (cover_port = 0; cover_port < NUM_PORTS; cover_port++) begin : gen_cover_each_port_grant
+            always_ff @(posedge clk) begin
+                cover(rst_n && grant[cover_port]);
+            end
+        end
+    endgenerate
 
+    // CV5: A valid request can produce a grant.
     always_ff @(posedge clk) begin
         cover(rst_n && out_ready && (|req) && (|grant));
     end
 
-    always_ff @(posedge clk) begin
-        cover(rst_n && fire);
-    end
-
-    always_ff @(posedge clk) begin
-        cover(rst_n && (|credit_return));
-    end
-
-    always_ff @(posedge clk) begin
-        cover(rst_n && fire && credit_return[grant_vc]);
-    end
-
-    // Cover that all ports request together and a grant occurs.
+    // CV6: All ports request at the same time and one grant is issued.
     always_ff @(posedge clk) begin
         cover(rst_n &&
               out_ready &&
@@ -460,6 +460,161 @@ module noc_arbiter_sva #(
               (credit_count_dbg[1] > 0) &&
               (|grant));
     end
+
+    // CV7: Back-to-back grants occur.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n && $past(rst_n)) begin
+            cover($past(|grant) && (|grant));
+        end
+    end
+
+    // CV8: Back-to-back grants to different ports occur.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n && $past(rst_n)) begin
+            cover($past(|grant) &&
+                  (|grant) &&
+                  ($past(grant) != grant));
+        end
+    end
+
+    // CV9: Credit return occurs.
+    always_ff @(posedge clk) begin
+        cover(rst_n && (|credit_return));
+    end
+
+    // CV10: Grant/fire consumes a credit.
+    always_ff @(posedge clk) begin
+        cover(rst_n && fire);
+    end
+
+    // CV11: Simultaneous grant/fire and credit return for selected VC.
+    always_ff @(posedge clk) begin
+        cover(rst_n && fire && credit_return[grant_vc]);
+    end
+
+    // CV12-CV13: Each VC can be selected by a grant.
+    generate
+        genvar cover_vc_grant;
+        for (cover_vc_grant = 0; cover_vc_grant < NUM_VCS; cover_vc_grant++) begin : gen_cover_each_vc_grant
+            always_ff @(posedge clk) begin
+                cover(rst_n && fire && (grant_vc == cover_vc_grant[VC_W-1:0]));
+            end
+        end
+    endgenerate
+
+    // CV14-CV15: Each VC can deplete to zero credit.
+    generate
+        genvar cover_deplete_vc;
+        for (cover_deplete_vc = 0; cover_deplete_vc < NUM_VCS; cover_deplete_vc++) begin : gen_cover_credit_depletion
+            always_ff @(posedge clk) begin
+                cover(rst_n && (credit_count_dbg[cover_deplete_vc] == '0));
+            end
+        end
+    endgenerate
+
+    // CV16-CV17: Credit return after depletion.
+    generate
+        genvar cover_return_vc;
+        for (cover_return_vc = 0; cover_return_vc < NUM_VCS; cover_return_vc++) begin : gen_cover_credit_return_after_depletion
+            always_ff @(posedge clk) begin
+                if (past_valid && rst_n && $past(rst_n)) begin
+                    cover(($past(credit_count_dbg[cover_return_vc]) == '0) &&
+                          credit_return[cover_return_vc] &&
+                          (credit_count_dbg[cover_return_vc] > '0));
+                end
+            end
+        end
+    endgenerate
+
+    // CV18: No grant due to output backpressure.
+    always_ff @(posedge clk) begin
+        cover(rst_n &&
+              (|req) &&
+              !out_ready &&
+              (grant == '0) &&
+              !out_valid);
+    end
+
+    // CV19: No grant due to all credits being zero.
+    always_ff @(posedge clk) begin
+        cover(rst_n &&
+              out_ready &&
+              (|req) &&
+              (credit_count_dbg[0] == '0) &&
+              (credit_count_dbg[1] == '0) &&
+              (grant == '0));
+    end
+
+    // CV20: Mixed request pattern.
+    always_ff @(posedge clk) begin
+        cover(rst_n &&
+              out_ready &&
+              (req == 4'b1010) &&
+              (|grant));
+    end
+
+    // CV21: Another mixed request pattern.
+    always_ff @(posedge clk) begin
+        cover(rst_n &&
+              out_ready &&
+              (req == 4'b0101) &&
+              (|grant));
+    end
+
+    // CV22: Priority pointer reaches each value.
+    generate
+        genvar cover_ptr;
+        for (cover_ptr = 0; cover_ptr < NUM_PORTS; cover_ptr++) begin : gen_cover_rr_ptr_values
+            always_ff @(posedge clk) begin
+                cover(rst_n && (rr_ptr_dbg == cover_ptr[PORT_W-1:0]));
+            end
+        end
+    endgenerate
+
+    // CV23: Priority pointer wraparound from last port back to 0.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n && $past(rst_n)) begin
+            cover(($past(rr_ptr_dbg) == (NUM_PORTS - 1)) &&
+                  (rr_ptr_dbg == '0));
+        end
+    end
+
+    // CV24: Reset recovery followed by a valid grant.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n && !$past(rst_n)) begin
+            cover(out_ready && (|req) && (|grant));
+        end
+    end
+
+    // CV25: All ports receive grants in a rough sequence over time.
+    // This is intentionally cover-only. It demonstrates rotation reachability.
+    property p_cover_all_ports_granted_sequence;
+        @(posedge clk) disable iff (!rst_n)
+            grant[0] ##[1:6] grant[1] ##[1:6] grant[2] ##[1:6] grant[3];
+    endproperty
+
+    cover property (p_cover_all_ports_granted_sequence);
+
+    // CV26: Credit depletion followed by credit return and later grant.
+    property p_cover_deplete_return_grant_vc0;
+        @(posedge clk) disable iff (!rst_n)
+            (credit_count_dbg[0] == '0)
+            ##[1:6] credit_return[0]
+            ##[1:6] (fire && (grant_vc == '0));
+    endproperty
+
+    cover property (p_cover_deplete_return_grant_vc0);
+
+    // CV27: VC1 depletion followed by credit return and later grant.
+    property p_cover_deplete_return_grant_vc1;
+        @(posedge clk) disable iff (!rst_n)
+            (credit_count_dbg[1] == '0)
+            ##[1:6] credit_return[1]
+            ##[1:6] (fire && (grant_vc == 1'b1));
+    endproperty
+
+    cover property (p_cover_deplete_return_grant_vc1);
+
 
 `endif
 
