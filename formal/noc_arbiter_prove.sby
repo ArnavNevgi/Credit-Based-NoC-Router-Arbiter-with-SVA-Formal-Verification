@@ -6,8 +6,8 @@ depth 20
 smtbmc z3
 
 [script]
-read -formal -sv ../rtl/credit_counter.sv
-read -formal -sv ../rtl/credit_rr_arbiter.sv
+read -formal -sv credit_counter.sv
+read -formal -sv credit_rr_arbiter.sv
 read -formal -sv noc_arbiter_sva.sv
 read -formal -sv noc_arbiter_formal_top.sv
 prep -top noc_arbiter_formal_top

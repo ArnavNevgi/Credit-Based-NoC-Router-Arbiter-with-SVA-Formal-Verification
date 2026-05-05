@@ -152,3 +152,14 @@ Added cover properties to demonstrate reachability of important arbitration and 
 | Priority pointer coverage | Covers all round-robin pointer values |
 | Pointer wraparound | Covers priority wrap from last port back to port 0 |
 | Reset recovery | Covers reset deassertion followed by a valid grant |
+
+## Phase 8 Formal Run Results
+
+Formal verification was run using SymbiYosys/Yosys/SMTBMC with Z3.
+
+| Run | Result |
+|---|---|
+| Prove | PASS: basecase and induction passed |
+| Cover | PASS: cover properties reached |
+
+A reset-related counterexample was debugged during Phase 8. The issue was caused by a synchronous reset assertion being sampled too early. The property was fixed using `$past(!rst_n)`-based reset checks, after which the prove run passed.

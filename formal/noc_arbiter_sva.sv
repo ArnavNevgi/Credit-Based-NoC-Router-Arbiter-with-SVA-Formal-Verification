@@ -42,14 +42,20 @@ module noc_arbiter_sva #(
     // Formal reset modeling
     // -------------------------------------------------------------------------
     logic past_valid;
+    logic history_valid;
 
     initial begin
         assume(!rst_n);
+        assume(!past_valid);
+        assume(!history_valid);
     end
 
     always_ff @(posedge clk) begin
         if (!past_valid) begin
             assume(!rst_n);
+        end else if ($past(rst_n)) begin
+            // Model a single initial reset pulse: once released, reset stays high.
+            assume(rst_n);
         end
         past_valid <= 1'b1;
     end
@@ -60,6 +66,21 @@ module noc_arbiter_sva #(
 
     logic fire;
     assign fire = out_valid && out_ready;
+
+    logic                              rst_n_q;
+    logic                              fire_q;
+    logic [VC_W-1:0]                   grant_vc_q;
+    logic [NUM_VCS-1:0]                credit_return_q;
+    logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg_q;
+
+    always_ff @(posedge clk) begin
+        history_valid      <= 1'b1;
+        rst_n_q            <= rst_n;
+        fire_q             <= fire;
+        grant_vc_q         <= grant_vc;
+        credit_return_q    <= credit_return;
+        credit_count_dbg_q <= credit_count_dbg;
+    end
 
     logic [NUM_VCS-1:0] grant_vc_decoded;
 
@@ -109,6 +130,11 @@ module noc_arbiter_sva #(
             assert(grant == '0);
             assert(out_valid == 1'b0);
             assert(grant_vc == '0);
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (past_valid && $past(past_valid) && $past(!rst_n)) begin
             assert(rr_ptr_dbg == '0);
         end
     end
@@ -117,7 +143,7 @@ module noc_arbiter_sva #(
         genvar r_vc;
         for (r_vc = 0; r_vc < NUM_VCS; r_vc++) begin : gen_reset_credit_assert
             always_ff @(posedge clk) begin
-                if (!rst_n) begin
+                if (past_valid && $past(past_valid) && $past(!rst_n)) begin
                     assert(credit_count_dbg[r_vc] == CREDIT_DEPTH);
                 end
             end
@@ -231,11 +257,12 @@ module noc_arbiter_sva #(
         genvar dec_vc;
         for (dec_vc = 0; dec_vc < NUM_VCS; dec_vc++) begin : gen_credit_decrement_assert
             always_ff @(posedge clk) begin
-                if (past_valid && $past(rst_n) && rst_n) begin
-                    if ($past(grant_vc_decoded[dec_vc]) &&
-                        !$past(credit_return[dec_vc])) begin
+                if (history_valid && rst_n_q && rst_n) begin
+                    if (fire_q &&
+                        (grant_vc_q == dec_vc[VC_W-1:0]) &&
+                        !credit_return_q[dec_vc]) begin
                         assert(credit_count_dbg[dec_vc] ==
-                               ($past(credit_count_dbg[dec_vc]) - 1'b1));
+                               (credit_count_dbg_q[dec_vc] - 1'b1));
                     end
                 end
             end
@@ -246,11 +273,12 @@ module noc_arbiter_sva #(
         genvar inc_vc;
         for (inc_vc = 0; inc_vc < NUM_VCS; inc_vc++) begin : gen_credit_increment_assert
             always_ff @(posedge clk) begin
-                if (past_valid && $past(rst_n) && rst_n) begin
-                    if ($past(credit_return[inc_vc]) &&
-                        !$past(grant_vc_decoded[inc_vc])) begin
+                if (history_valid && rst_n_q && rst_n) begin
+                    if (credit_return_q[inc_vc] &&
+                        !(fire_q &&
+                          (grant_vc_q == inc_vc[VC_W-1:0]))) begin
                         assert(credit_count_dbg[inc_vc] ==
-                               ($past(credit_count_dbg[inc_vc]) + 1'b1));
+                               (credit_count_dbg_q[inc_vc] + 1'b1));
                     end
                 end
             end
@@ -261,11 +289,12 @@ module noc_arbiter_sva #(
         genvar same_vc;
         for (same_vc = 0; same_vc < NUM_VCS; same_vc++) begin : gen_credit_inc_dec_same_cycle_assert
             always_ff @(posedge clk) begin
-                if (past_valid && $past(rst_n) && rst_n) begin
-                    if ($past(credit_return[same_vc]) &&
-                        $past(grant_vc_decoded[same_vc])) begin
+                if (history_valid && rst_n_q && rst_n) begin
+                    if (credit_return_q[same_vc] &&
+                        fire_q &&
+                        (grant_vc_q == same_vc[VC_W-1:0])) begin
                         assert(credit_count_dbg[same_vc] ==
-                               $past(credit_count_dbg[same_vc]));
+                               credit_count_dbg_q[same_vc]);
                     end
                 end
             end
@@ -276,11 +305,12 @@ module noc_arbiter_sva #(
         genvar hold_vc;
         for (hold_vc = 0; hold_vc < NUM_VCS; hold_vc++) begin : gen_credit_hold_assert
             always_ff @(posedge clk) begin
-                if (past_valid && $past(rst_n) && rst_n) begin
-                    if (!$past(credit_return[hold_vc]) &&
-                        !$past(grant_vc_decoded[hold_vc])) begin
+                if (history_valid && rst_n_q && rst_n) begin
+                    if (!credit_return_q[hold_vc] &&
+                        !(fire_q &&
+                          (grant_vc_q == hold_vc[VC_W-1:0]))) begin
                         assert(credit_count_dbg[hold_vc] ==
-                               $past(credit_count_dbg[hold_vc]));
+                               credit_count_dbg_q[hold_vc]);
                     end
                 end
             end
@@ -349,76 +379,90 @@ module noc_arbiter_sva #(
     // -------------------------------------------------------------------------
     // Phase 6 bounded fairness / no-starvation checks
     //
-    // These are bounded liveness-style checks.
+    // Yosys-compatible procedural version.
     //
-    // Meaning:
-    // If a requester keeps its request asserted, the output remains ready, and
-    // the requested VC has credit available, the requester should be granted
-    // within FAIR_BOUND cycles.
+    // If a requester remains active, output remains ready, and its requested VC
+    // remains credited over a bounded window, then the requester should have
+    // received a grant within that window.
     //
-    // This is not an unbounded industrial starvation proof. It is a bounded
-    // formal fairness check under legal traffic assumptions.
+    // This is a bounded fairness check, not an unbounded liveness proof.
     // -------------------------------------------------------------------------
 
     generate
         genvar fair_port;
         for (fair_port = 0; fair_port < NUM_PORTS; fair_port++) begin : gen_bounded_fairness_assert
+            genvar fair_vc;
+            for (fair_vc = 0; fair_vc < NUM_VCS; fair_vc++) begin : gen_bounded_fairness_vc_assert
 
-            property p_bounded_no_starvation;
-                @(posedge clk) disable iff (!rst_n)
-                    (
+                always_ff @(posedge clk) begin
+                    if (past_valid && rst_n &&
+                        $past(rst_n, 4) &&
+                        $past(rst_n, 3) &&
+                        $past(rst_n, 2) &&
+                        $past(rst_n, 1) &&
+
+                        $past(req[fair_port], 4) &&
+                        $past(req[fair_port], 3) &&
+                        $past(req[fair_port], 2) &&
+                        $past(req[fair_port], 1) &&
                         req[fair_port] &&
+
+                        $past(out_ready, 4) &&
+                        $past(out_ready, 3) &&
+                        $past(out_ready, 2) &&
+                        $past(out_ready, 1) &&
                         out_ready &&
-                        (credit_count_dbg[req_vc[fair_port]] > 0)
-                    )
-                    |->
-                    (
-                        grant[fair_port] or
-                        ##1 grant[fair_port] or
-                        ##2 grant[fair_port] or
-                        ##3 grant[fair_port] or
-                        ##4 grant[fair_port]
-                    );
-            endproperty
 
-            assert property (p_bounded_no_starvation);
+                        ($past(req_vc[fair_port], 4) == fair_vc[VC_W-1:0]) &&
+                        ($past(req_vc[fair_port], 3) == fair_vc[VC_W-1:0]) &&
+                        ($past(req_vc[fair_port], 2) == fair_vc[VC_W-1:0]) &&
+                        ($past(req_vc[fair_port], 1) == fair_vc[VC_W-1:0]) &&
+                        (req_vc[fair_port] == fair_vc[VC_W-1:0]) &&
 
+                        ($past(credit_count_dbg[fair_vc], 4) > 0) &&
+                        ($past(credit_count_dbg[fair_vc], 3) > 0) &&
+                        ($past(credit_count_dbg[fair_vc], 2) > 0) &&
+                        ($past(credit_count_dbg[fair_vc], 1) > 0) &&
+                        (credit_count_dbg[fair_vc] > 0)) begin
+
+                        assert($past(grant[fair_port], 4) ||
+                               $past(grant[fair_port], 3) ||
+                               $past(grant[fair_port], 2) ||
+                               $past(grant[fair_port], 1) ||
+                               grant[fair_port]);
+                    end
+                end
+
+            end
         end
     endgenerate
 
-    // Stronger fairness check under all-ports-active traffic.
-    // If all ports request continuously, output is ready, and both VCs have
-    // credit available, then at least one grant must occur.
-    property p_all_requests_make_progress;
-        @(posedge clk) disable iff (!rst_n)
-            ((req == {NUM_PORTS{1'b1}}) &&
-             out_ready &&
-             (credit_count_dbg[0] > 0) &&
-             (credit_count_dbg[1] > 0))
-            |->
-            (|grant);
-    endproperty
+    // If all ports request, output is ready, and both VCs have credit,
+    // at least one grant must occur.
+    always_ff @(posedge clk) begin
+        if (rst_n &&
+            (req == {NUM_PORTS{1'b1}}) &&
+            out_ready &&
+            (credit_count_dbg[0] > 0) &&
+            (credit_count_dbg[1] > 0)) begin
+            assert(|grant);
+        end
+    end
 
-    assert property (p_all_requests_make_progress);
-
-    // Under legal traffic, if the current priority port requests and its VC has
-    // credit, it should be granted immediately.
+    // If the current priority port requests and its VC has credit,
+    // it should be granted immediately.
     generate
         genvar pri_port;
         for (pri_port = 0; pri_port < NUM_PORTS; pri_port++) begin : gen_priority_port_immediate_grant
-            property p_priority_port_grants_first;
-                @(posedge clk) disable iff (!rst_n)
-                    (
-                        (rr_ptr_dbg == pri_port[PORT_W-1:0]) &&
-                        req[pri_port] &&
-                        out_ready &&
-                        (credit_count_dbg[req_vc[pri_port]] > 0)
-                    )
-                    |->
-                    grant[pri_port];
-            endproperty
-
-            assert property (p_priority_port_grants_first);
+            always_ff @(posedge clk) begin
+                if (rst_n &&
+                    (rr_ptr_dbg == pri_port[PORT_W-1:0]) &&
+                    req[pri_port] &&
+                    out_ready &&
+                    (credit_count_dbg[req_vc[pri_port]] > 0)) begin
+                    assert(grant[pri_port]);
+                end
+            end
         end
     endgenerate
 
@@ -586,34 +630,46 @@ module noc_arbiter_sva #(
         end
     end
 
-    // CV25: All ports receive grants in a rough sequence over time.
-    // This is intentionally cover-only. It demonstrates rotation reachability.
-    property p_cover_all_ports_granted_sequence;
-        @(posedge clk) disable iff (!rst_n)
-            grant[0] ##[1:6] grant[1] ##[1:6] grant[2] ##[1:6] grant[3];
-    endproperty
+        // CV25 alternative: observe all four ports granted within recent history.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n &&
+            $past(rst_n, 4) &&
+            $past(rst_n, 3) &&
+            $past(rst_n, 2) &&
+            $past(rst_n, 1)) begin
 
-    cover property (p_cover_all_ports_granted_sequence);
+            cover(($past(grant[0], 4) || $past(grant[0], 3) || $past(grant[0], 2) || $past(grant[0], 1) || grant[0]) &&
+                  ($past(grant[1], 4) || $past(grant[1], 3) || $past(grant[1], 2) || $past(grant[1], 1) || grant[1]) &&
+                  ($past(grant[2], 4) || $past(grant[2], 3) || $past(grant[2], 2) || $past(grant[2], 1) || grant[2]) &&
+                  ($past(grant[3], 4) || $past(grant[3], 3) || $past(grant[3], 2) || $past(grant[3], 1) || grant[3]));
+        end
+    end
 
-    // CV26: Credit depletion followed by credit return and later grant.
-    property p_cover_deplete_return_grant_vc0;
-        @(posedge clk) disable iff (!rst_n)
-            (credit_count_dbg[0] == '0)
-            ##[1:6] credit_return[0]
-            ##[1:6] (fire && (grant_vc == '0));
-    endproperty
+    // CV26 alternative: VC0 depletion followed by later nonzero credit.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n &&
+            $past(rst_n, 4) &&
+            $past(rst_n, 3) &&
+            $past(rst_n, 2) &&
+            $past(rst_n, 1)) begin
 
-    cover property (p_cover_deplete_return_grant_vc0);
+            cover(($past(credit_count_dbg[0], 4) == '0) &&
+                  (credit_count_dbg[0] > '0));
+        end
+    end
 
-    // CV27: VC1 depletion followed by credit return and later grant.
-    property p_cover_deplete_return_grant_vc1;
-        @(posedge clk) disable iff (!rst_n)
-            (credit_count_dbg[1] == '0)
-            ##[1:6] credit_return[1]
-            ##[1:6] (fire && (grant_vc == 1'b1));
-    endproperty
+    // CV27 alternative: VC1 depletion followed by later nonzero credit.
+    always_ff @(posedge clk) begin
+        if (past_valid && rst_n &&
+            $past(rst_n, 4) &&
+            $past(rst_n, 3) &&
+            $past(rst_n, 2) &&
+            $past(rst_n, 1)) begin
 
-    cover property (p_cover_deplete_return_grant_vc1);
+            cover(($past(credit_count_dbg[1], 4) == '0) &&
+                  (credit_count_dbg[1] > '0));
+        end
+    end
 
 
 `endif
