@@ -1,0 +1,19 @@
+[options]
+mode prove
+depth 20
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal -sv ../rtl/credit_counter.sv
+read -formal -sv ../rtl/credit_rr_arbiter.sv
+read -formal -sv noc_arbiter_sva.sv
+read -formal -sv noc_arbiter_formal_top.sv
+prep -top noc_arbiter_formal_top
+
+[files]
+../rtl/credit_counter.sv
+../rtl/credit_rr_arbiter.sv
+noc_arbiter_sva.sv
+noc_arbiter_formal_top.sv
