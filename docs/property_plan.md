@@ -141,3 +141,16 @@ These checks are sufficient for this student portfolio project and should be des
 | CV25 | All ports grant sequence | Cover | Implemented | Shows grant rotation over time |
 | CV26 | VC0 deplete-return-grant | Cover | Implemented | Shows full credit-flow lifecycle for VC0 |
 | CV27 | VC1 deplete-return-grant | Cover | Implemented | Shows full credit-flow lifecycle for VC1 |
+
+
+## PHASE 8
+
+| Property Group | Status | Notes |
+|---|---|---|
+| Reset safety | PASS | Reset assertions passed after synchronous reset property timing fix |
+| Grant safety | PASS | Mutual exclusion, grant validity, no-request/no-ready blocking proved |
+| Credit safety | PASS | Credit bounds and zero-credit blocking proved |
+| Credit accounting | PASS | Decrement, increment, same-cycle inc/dec, and hold behavior proved |
+| Round-robin pointer | PASS | Pointer stability and update behavior proved |
+| Bounded fairness | PASS | Bounded no-starvation checks passed under legal traffic assumptions |
+| Cover reachability | TBD | Pending cover run |

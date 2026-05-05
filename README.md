@@ -8,6 +8,43 @@ The design models one output port shared by four input ports. Each requester can
 
 This is not a full NoC router. The scope is intentionally limited to keep the design focused, formally verifiable, and interview-explainable.
 
+## Why This Project Matters
+
+Modern SoCs often use Network-on-Chip fabrics or router-like interconnect structures to move traffic between IP blocks. Arbitration and flow control are critical because incorrect grants or credit accounting can cause dropped data, buffer overflow, unfair access, or deadlock-like behavior.
+
+This project focuses on a small but realistic part of that problem: a credit-aware output-port arbiter. The arbiter grants one requester at a time using round-robin priority, but only if the selected virtual channel has downstream credit available.
+
+The main value of this project is not RTL size. The value is the formal verification flow:
+
+- safety assertions
+- credit accounting properties
+- bounded fairness checks
+- cover reachability
+- counterexample debug
+- proof result documentation
+
+## Formal Results Summary
+
+| Run | Tool Flow | Result |
+|---|---|---|
+| Prove | SymbiYosys + Yosys + SMTBMC + Z3 | PASS |
+| Cover | SymbiYosys + Yosys + SMTBMC + Z3 | PASS |
+
+The prove run completed with:
+
+- basecase PASS
+- induction PASS
+- successful proof by k-induction
+
+The cover run completed successfully and reached the planned cover properties.
+
+Detailed results are documented in:
+
+- `docs/proof_results.md`
+- `docs/counterexample_debug.md`
+- `regressions/formal/phase8_prove_log.txt`
+- `regressions/formal/phase8_cover_log.txt`
+
 ## Design Scope
 
 | Feature | Scope |
@@ -21,6 +58,40 @@ This is not a full NoC router. The scope is intentionally limited to keep the de
 | Credit model | Per-VC downstream credit counters |
 | Verification focus | SVA-based formal verification |
 | Formal tool target | SymbiYosys / Yosys / SMTBMC |
+
+## How to Run
+
+### QuestaSim Compile Check
+
+From QuestaSim Transcript:
+
+```tcl
+cd C:/credit_based_NOC/credit-based-noc-arbiter-formal/sim
+do compile.do
+
+### Yosys Elaboration Check
+
+```wsl
+cd /mnt/c/credit_based_NOC/credit-based-noc-arbiter-formal/formal
+
+yosys -p "read -formal -sv ../rtl/credit_counter.sv; read -formal -sv ../rtl/credit_rr_arbiter.sv; read -formal -sv noc_arbiter_sva.sv; read -formal -sv noc_arbiter_formal_top.sv; prep -top noc_arbiter_formal_top"
+
+### SymbiYosys Prove Run
+
+```wsl
+
+cd /mnt/c/credit_based_NOC/credit-based-noc-arbiter-formal/formal
+
+rm -rf noc_arbiter_prove
+sby -f noc_arbiter_prove.sby
+
+### SymbiYosys Cover Run
+
+```wsl
+cd /mnt/c/credit_based_NOC/credit-based-noc-arbiter-formal/formal
+
+rm -rf noc_arbiter_prove
+sby -f noc_arbiter_prove.sby
 
 ## High-Level Block Diagram
 
@@ -73,18 +144,80 @@ Round-robin pointer behavior
 Bounded no-starvation under legal traffic
 Cover reachability for key arbitration and credit scenarios
 
-| Phase                                    | Status      |
-| ---------------------------------------- | ----------- |
-| Phase 1: Architecture and skeleton files | In progress |
-| Phase 2: RTL implementation              | Not started |
-| Phase 3: Formal harness                  | Not started |
-| Phase 4: Safety assertions               | Not started |
-| Phase 5: Credit properties               | Not started |
-| Phase 6: Bounded fairness checks         | Not started |
-| Phase 7: Cover properties                | Not started |
-| Phase 8: Counterexample debug            | Not started |
-| Phase 9: Documentation                   | Not started |
-| Phase 10: Resume bullets                 | Not started |
+## File Description
+
+| File                                  | Purpose                                        |
+| ------------------------------------- | ---------------------------------------------- |
+| `rtl/credit_counter.sv`               | Bounded credit counter for one virtual channel |
+| `rtl/credit_rr_arbiter.sv`            | Credit-aware round-robin arbiter               |
+| `formal/noc_arbiter_formal_top.sv`    | Formal top-level harness                       |
+| `formal/noc_arbiter_sva.sv`           | Assumptions, assertions, and cover properties  |
+| `formal/noc_arbiter_prove.sby`        | SymbiYosys prove configuration                 |
+| `formal/noc_arbiter_cover.sby`        | SymbiYosys cover configuration                 |
+| `sim/compile.do`                      | QuestaSim compile script                       |
+| `docs/architecture.md`                | Design architecture and transaction behavior   |
+| `docs/property_plan.md`               | Formal property plan                           |
+| `docs/proof_results.md`               | Proof and cover run results                    |
+| `docs/counterexample_debug.md`        | Counterexample debug notes                     |
+| `docs/limitations_and_future_work.md` | Scope limitations and future extensions        |
+
+
+## Formal Verification Methodology
+
+The formal verification flow uses a small harness around the RTL. Inputs such as requests, requested virtual channels, output readiness, and credit returns are treated as symbolic formal inputs.
+
+The property set includes:
+
+### Environment Assumptions
+
+- Requested VC values remain legal.
+- Credit return behavior does not illegally overflow a full credit counter.
+- Bounded fairness checks assume persistent legal request conditions.
+
+### Safety Assertions
+
+- Grant is one-hot or zero.
+- Grant implies active request.
+- Grant implies available credit.
+- No grant occurs when all requests are low.
+- No grant occurs when output is not ready.
+- No grant occurs when all VC credits are zero.
+- `out_valid` matches the grant vector.
+- `grant_vc` matches the granted requester.
+
+### Credit Accounting Assertions
+
+- Credit count never exceeds `CREDIT_DEPTH`.
+- Credit decrements on successful grant/fire.
+- Credit increments on legal credit return.
+- Same-cycle consume and return preserves credit count.
+- Credit count holds when no consume/return occurs.
+- Zero-credit VC cannot be consumed.
+
+### Round-Robin Assertions
+
+- Round-robin pointer remains in range.
+- Pointer stays stable when no transfer fires.
+- Pointer advances to the port after the granted requester.
+
+### Bounded Fairness Checks
+
+The project includes bounded no-starvation checks. These prove that a persistent legal requester receives a grant within a bounded window when output remains ready and credit remains available.
+
+These are bounded formal checks, not complete unbounded liveness proofs.
+
+### Cover Properties
+
+Cover properties demonstrate reachability of key scenarios:
+
+- each port receives a grant
+- each VC is selected
+- back-to-back grants occur
+- credits deplete and return
+- backpressure blocks grants
+- zero-credit state blocks grants
+- round-robin pointer wraps around
+- reset recovery leads to a valid grant
 
 
 Phase 4 Safety Assertions
