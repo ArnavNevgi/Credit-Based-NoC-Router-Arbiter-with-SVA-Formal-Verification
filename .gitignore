@@ -1,0 +1,34 @@
+# Simulation outputs
+*.vcd
+*.fst
+*.wlf
+*.log
+*.jou
+*.pb
+*.str
+
+# Questa/ModelSim
+work/
+transcript
+modelsim.ini
+vsim_stacktrace.vstf
+vish_stacktrace.vstf
+
+# SymbiYosys/Yosys outputs
+*.smt2
+*.yslog
+*.xml
+*.json
+*.il
+*.aig
+*.cnf
+*.sby_status
+*_prove/
+*_cover/
+formal/*_prove/
+formal/*_cover/
+
+# Editor/OS
+.vscode/
+.DS_Store
+Thumbs.db
