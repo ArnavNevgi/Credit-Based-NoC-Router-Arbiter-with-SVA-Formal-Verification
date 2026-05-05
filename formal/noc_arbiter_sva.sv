@@ -1,8 +1,8 @@
 // -----------------------------------------------------------------------------
 // File        : noc_arbiter_sva.sv
 // Project     : Credit-Based NoC Router Arbiter with SVA Formal Verification
-// Description : Safety and credit-accounting assertions for credit-based NoC arbiter.
-// Phase       : Phase 5 - Credit accounting properties.
+// Description : Safety, credit-accounting, and bounded fairness assertions.
+// Phase       : Phase 6 - Bounded no-starvation checks.
 // -----------------------------------------------------------------------------
 
 `timescale 1ns/1ps
@@ -13,7 +13,12 @@ module noc_arbiter_sva #(
     parameter int CREDIT_DEPTH = 4,
     parameter int PORT_W       = $clog2(NUM_PORTS),
     parameter int VC_W         = $clog2(NUM_VCS),
-    parameter int CREDIT_W     = $clog2(CREDIT_DEPTH + 1)
+    parameter int CREDIT_W     = $clog2(CREDIT_DEPTH + 1),
+
+    // Bounded fairness window.
+    // For 4 ports, a legal persistent requester should be served within 4 cycles
+    // when all required assumptions hold.
+    parameter int FAIR_BOUND   = NUM_PORTS
 ) (
     input logic                              clk,
     input logic                              rst_n,
@@ -54,10 +59,8 @@ module noc_arbiter_sva #(
     // -------------------------------------------------------------------------
 
     logic fire;
-
     assign fire = out_valid && out_ready;
 
-    // Decode which VC is consumed by the current grant.
     logic [NUM_VCS-1:0] grant_vc_decoded;
 
     always_comb begin
@@ -72,9 +75,6 @@ module noc_arbiter_sva #(
     // Environment assumptions
     // -------------------------------------------------------------------------
 
-    // Requested VC must be legal.
-    // With NUM_VCS = 2 and VC_W = 1, this is naturally true.
-    // This assumption keeps the property module parameter-scalable.
     generate
         genvar a_port;
         for (a_port = 0; a_port < NUM_PORTS; a_port++) begin : gen_req_vc_legal_assume
@@ -85,16 +85,8 @@ module noc_arbiter_sva #(
     endgenerate
 
     // Credit return legality:
-    // The environment cannot return credit to a full VC unless the same cycle
-    // also consumes one credit from that same VC.
-    //
-    // This is more precise than the Phase 4 assumption.
-    // Legal cases:
-    // - count < CREDIT_DEPTH and credit_return = 1
-    // - count == CREDIT_DEPTH, credit_return = 1, and same VC is also decremented
-    //
-    // Illegal case:
-    // - count == CREDIT_DEPTH, credit_return = 1, and no same-cycle decrement
+    // Returning credit to a full VC is legal only if the same VC is consumed in
+    // the same cycle.
     generate
         genvar a_vc;
         for (a_vc = 0; a_vc < NUM_VCS; a_vc++) begin : gen_credit_return_legal_assume
@@ -136,21 +128,18 @@ module noc_arbiter_sva #(
     // Grant safety assertions
     // -------------------------------------------------------------------------
 
-    // S1: Grant must be one-hot or zero.
     always_ff @(posedge clk) begin
         if (rst_n) begin
             assert($onehot0(grant));
         end
     end
 
-    // S2: out_valid must match whether any grant is active.
     always_ff @(posedge clk) begin
         if (rst_n) begin
             assert(out_valid == (|grant));
         end
     end
 
-    // S3: No grant when no request is active.
     always_ff @(posedge clk) begin
         if (rst_n && (req == '0)) begin
             assert(grant == '0);
@@ -158,7 +147,6 @@ module noc_arbiter_sva #(
         end
     end
 
-    // S4: No grant when output is not ready.
     always_ff @(posedge clk) begin
         if (rst_n && !out_ready) begin
             assert(grant == '0);
@@ -166,7 +154,6 @@ module noc_arbiter_sva #(
         end
     end
 
-    // S5: Each grant bit must imply the corresponding request bit.
     generate
         genvar g_port;
         for (g_port = 0; g_port < NUM_PORTS; g_port++) begin : gen_grant_implies_req_assert
@@ -178,7 +165,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // S6: Grant must imply available credit for the requested VC.
     generate
         genvar c_port;
         for (c_port = 0; c_port < NUM_PORTS; c_port++) begin : gen_grant_implies_credit_assert
@@ -190,7 +176,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // S7: grant_vc must match the VC requested by the granted port.
     generate
         genvar vc_port;
         for (vc_port = 0; vc_port < NUM_PORTS; vc_port++) begin : gen_grant_vc_match_assert
@@ -202,7 +187,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // S8: If all credits are zero, there must be no grant.
     always_ff @(posedge clk) begin
         if (rst_n) begin
             if ((credit_count_dbg[0] == '0) && (credit_count_dbg[1] == '0)) begin
@@ -212,14 +196,12 @@ module noc_arbiter_sva #(
         end
     end
 
-    // S9: If there is a grant, the selected grant_vc must have nonzero credit.
     always_ff @(posedge clk) begin
         if (rst_n && out_valid) begin
             assert(credit_count_dbg[grant_vc] > 0);
         end
     end
 
-    // S10: A grant can only happen when out_ready is high.
     always_ff @(posedge clk) begin
         if (rst_n && (|grant)) begin
             assert(out_ready);
@@ -230,10 +212,6 @@ module noc_arbiter_sva #(
     // Credit range safety
     // -------------------------------------------------------------------------
 
-    // C1/C2: Credit count must always stay between 0 and CREDIT_DEPTH.
-    // Since credit_count_dbg is unsigned, underflow manifests as wraparound above
-    // CREDIT_DEPTH. Therefore, the upper-bound assertion catches both overflow
-    // and underflow-wrap behavior.
     generate
         genvar cr_vc;
         for (cr_vc = 0; cr_vc < NUM_VCS; cr_vc++) begin : gen_credit_range_assert
@@ -246,11 +224,9 @@ module noc_arbiter_sva #(
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Phase 5 credit-accounting assertions
+    // Credit-accounting assertions
     // -------------------------------------------------------------------------
 
-    // C3: Credit decrements by one when a VC is consumed and no credit returns
-    // for that VC in the same cycle.
     generate
         genvar dec_vc;
         for (dec_vc = 0; dec_vc < NUM_VCS; dec_vc++) begin : gen_credit_decrement_assert
@@ -266,8 +242,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // C4: Credit increments by one when a credit returns and no grant consumes
-    // that same VC in the same cycle.
     generate
         genvar inc_vc;
         for (inc_vc = 0; inc_vc < NUM_VCS; inc_vc++) begin : gen_credit_increment_assert
@@ -283,8 +257,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // C5: If credit return and credit consume happen for the same VC in the same
-    // cycle, the net available credit count remains unchanged.
     generate
         genvar same_vc;
         for (same_vc = 0; same_vc < NUM_VCS; same_vc++) begin : gen_credit_inc_dec_same_cycle_assert
@@ -300,8 +272,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // C6: If neither credit return nor grant consume occurs for a VC, credit count
-    // must remain stable.
     generate
         genvar hold_vc;
         for (hold_vc = 0; hold_vc < NUM_VCS; hold_vc++) begin : gen_credit_hold_assert
@@ -317,7 +287,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // C7: A VC at zero credit cannot be consumed.
     generate
         genvar zero_vc;
         for (zero_vc = 0; zero_vc < NUM_VCS; zero_vc++) begin : gen_zero_credit_no_consume_assert
@@ -329,9 +298,6 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // C8: If a VC is full, credit_return without same-cycle consume is illegal
-    // due to environment assumption. This assertion documents the expected
-    // safe behavior visible at the design boundary.
     generate
         genvar full_vc;
         for (full_vc = 0; full_vc < NUM_VCS; full_vc++) begin : gen_full_credit_return_assert
@@ -346,7 +312,7 @@ module noc_arbiter_sva #(
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Basic round-robin pointer range safety
+    // Round-robin pointer safety
     // -------------------------------------------------------------------------
 
     always_ff @(posedge clk) begin
@@ -355,7 +321,6 @@ module noc_arbiter_sva #(
         end
     end
 
-    // RR1: Pointer must remain stable if no fire occurred in the previous cycle.
     always_ff @(posedge clk) begin
         if (past_valid && $past(rst_n) && rst_n) begin
             if (!$past(fire)) begin
@@ -364,7 +329,6 @@ module noc_arbiter_sva #(
         end
     end
 
-    // RR2: Pointer should advance to granted port + 1 after a fire.
     generate
         genvar rr_port;
         for (rr_port = 0; rr_port < NUM_PORTS; rr_port++) begin : gen_rr_ptr_update_assert
@@ -383,8 +347,84 @@ module noc_arbiter_sva #(
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Phase 5 cover sanity
-    // More detailed cover properties will be added in Phase 7.
+    // Phase 6 bounded fairness / no-starvation checks
+    //
+    // These are bounded liveness-style checks.
+    //
+    // Meaning:
+    // If a requester keeps its request asserted, the output remains ready, and
+    // the requested VC has credit available, the requester should be granted
+    // within FAIR_BOUND cycles.
+    //
+    // This is not an unbounded industrial starvation proof. It is a bounded
+    // formal fairness check under legal traffic assumptions.
+    // -------------------------------------------------------------------------
+
+    generate
+        genvar fair_port;
+        for (fair_port = 0; fair_port < NUM_PORTS; fair_port++) begin : gen_bounded_fairness_assert
+
+            property p_bounded_no_starvation;
+                @(posedge clk) disable iff (!rst_n)
+                    (
+                        req[fair_port] &&
+                        out_ready &&
+                        (credit_count_dbg[req_vc[fair_port]] > 0)
+                    )
+                    |->
+                    (
+                        grant[fair_port] or
+                        ##1 grant[fair_port] or
+                        ##2 grant[fair_port] or
+                        ##3 grant[fair_port] or
+                        ##4 grant[fair_port]
+                    );
+            endproperty
+
+            assert property (p_bounded_no_starvation);
+
+        end
+    endgenerate
+
+    // Stronger fairness check under all-ports-active traffic.
+    // If all ports request continuously, output is ready, and both VCs have
+    // credit available, then at least one grant must occur.
+    property p_all_requests_make_progress;
+        @(posedge clk) disable iff (!rst_n)
+            ((req == {NUM_PORTS{1'b1}}) &&
+             out_ready &&
+             (credit_count_dbg[0] > 0) &&
+             (credit_count_dbg[1] > 0))
+            |->
+            (|grant);
+    endproperty
+
+    assert property (p_all_requests_make_progress);
+
+    // Under legal traffic, if the current priority port requests and its VC has
+    // credit, it should be granted immediately.
+    generate
+        genvar pri_port;
+        for (pri_port = 0; pri_port < NUM_PORTS; pri_port++) begin : gen_priority_port_immediate_grant
+            property p_priority_port_grants_first;
+                @(posedge clk) disable iff (!rst_n)
+                    (
+                        (rr_ptr_dbg == pri_port[PORT_W-1:0]) &&
+                        req[pri_port] &&
+                        out_ready &&
+                        (credit_count_dbg[req_vc[pri_port]] > 0)
+                    )
+                    |->
+                    grant[pri_port];
+            endproperty
+
+            assert property (p_priority_port_grants_first);
+        end
+    endgenerate
+
+    // -------------------------------------------------------------------------
+    // Phase 6 cover sanity
+    // Detailed cover plan remains Phase 7.
     // -------------------------------------------------------------------------
 
     always_ff @(posedge clk) begin
@@ -399,19 +439,26 @@ module noc_arbiter_sva #(
         cover(rst_n && out_ready && (|req) && (|grant));
     end
 
-    // See at least one credit decrement event.
     always_ff @(posedge clk) begin
         cover(rst_n && fire);
     end
 
-    // See at least one credit return event.
     always_ff @(posedge clk) begin
         cover(rst_n && (|credit_return));
     end
 
-    // See a simultaneous credit return and grant consume.
     always_ff @(posedge clk) begin
         cover(rst_n && fire && credit_return[grant_vc]);
+    end
+
+    // Cover that all ports request together and a grant occurs.
+    always_ff @(posedge clk) begin
+        cover(rst_n &&
+              out_ready &&
+              (req == {NUM_PORTS{1'b1}}) &&
+              (credit_count_dbg[0] > 0) &&
+              (credit_count_dbg[1] > 0) &&
+              (|grant));
     end
 
 `endif

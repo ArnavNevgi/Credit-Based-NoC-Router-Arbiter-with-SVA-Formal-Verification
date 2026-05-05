@@ -117,3 +117,18 @@ Implemented SVA safety checks for:
 | C8 | Full-credit return requires same-cycle consume | Assert/Assume-supported | Implemented | Prevents illegal overflow from environment credit return |
 | RR1 | Pointer stable without fire | Assert | Implemented | Ensures arbitration priority changes only after successful transfer |
 | RR2 | Pointer advances after granted port | Assert | Implemented | Ensures round-robin pointer updates correctly after fire |
+
+## Phase 6 Bounded Fairness Checks
+
+Implemented bounded no-starvation checks for the 4-port round-robin arbiter.
+
+The properties check that when a requester keeps requesting under legal conditions, the arbiter grants that requester within a bounded number of cycles.
+
+Legal conditions include:
+
+- requester remains active
+- output remains ready
+- requested VC has available credit
+- round-robin pointer remains inside the legal range
+
+The project intentionally describes these as bounded fairness checks, not complete unbounded starvation-freedom proofs. 
