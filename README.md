@@ -85,3 +85,35 @@ Cover reachability for key arbitration and credit scenarios
 | Phase 8: Counterexample debug            | Not started |
 | Phase 9: Documentation                   | Not started |
 | Phase 10: Resume bullets                 | Not started |
+
+
+Phase 4 Safety Assertions
+
+Implemented SVA safety checks for:
+
+- One-hot-or-zero grant behavior
+- Grant implies active request
+- Grant implies available VC credit
+- No grant when no request is active
+- No grant when output is not ready
+- No grant when all VC credits are zero
+- `out_valid` consistency with grant
+- `grant_vc` consistency with selected requester
+- Reset behavior for grant, output-valid, pointer, and credit state
+- Round-robin pointer range safety
+- Credit count range safety
+
+## Phase 5 Implemented Credit Accounting Properties
+
+| ID | Property Name | Type | Status | Purpose |
+|---|---|---|---|---|
+| C1 | Credit upper-bound safety | Assert | Implemented | Ensures credit count never exceeds `CREDIT_DEPTH` |
+| C2 | Credit underflow-wrap protection | Assert | Implemented | Unsigned underflow would wrap above valid range, caught by upper-bound check |
+| C3 | Credit decrements on VC consume | Assert | Implemented | Ensures successful grant/fire consumes one credit from selected VC |
+| C4 | Credit increments on legal return | Assert | Implemented | Ensures downstream credit return restores one credit |
+| C5 | Simultaneous consume and return preserves count | Assert | Implemented | Ensures same-cycle inc/dec has zero net effect |
+| C6 | Credit holds when no event occurs | Assert | Implemented | Ensures credit count is stable without return or consume |
+| C7 | Zero-credit VC cannot be consumed | Assert | Implemented | Prevents grant/fire from using unavailable downstream buffer |
+| C8 | Full-credit return requires same-cycle consume | Assert/Assume-supported | Implemented | Prevents illegal overflow from environment credit return |
+| RR1 | Pointer stable without fire | Assert | Implemented | Ensures arbitration priority changes only after successful transfer |
+| RR2 | Pointer advances after granted port | Assert | Implemented | Ensures round-robin pointer updates correctly after fire |

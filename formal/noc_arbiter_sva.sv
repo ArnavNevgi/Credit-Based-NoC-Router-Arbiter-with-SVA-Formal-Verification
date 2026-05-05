@@ -1,8 +1,8 @@
 // -----------------------------------------------------------------------------
 // File        : noc_arbiter_sva.sv
 // Project     : Credit-Based NoC Router Arbiter with SVA Formal Verification
-// Description : Safety assertions for credit-based NoC arbiter.
-// Phase       : Phase 4 - Core safety properties.
+// Description : Safety and credit-accounting assertions for credit-based NoC arbiter.
+// Phase       : Phase 5 - Credit accounting properties.
 // -----------------------------------------------------------------------------
 
 `timescale 1ns/1ps
@@ -19,7 +19,7 @@ module noc_arbiter_sva #(
     input logic                              rst_n,
 
     input logic [NUM_PORTS-1:0]              req,
-    input var logic [NUM_PORTS-1:0][VC_W-1:0]    req_vc,
+    input logic [NUM_PORTS-1:0][VC_W-1:0]    req_vc,
     input logic                              out_ready,
     input logic [NUM_VCS-1:0]                credit_return,
 
@@ -28,7 +28,7 @@ module noc_arbiter_sva #(
     input logic [VC_W-1:0]                   grant_vc,
 
     input logic [PORT_W-1:0]                 rr_ptr_dbg,
-    input var logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg
+    input logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg
 );
 
 `ifdef FORMAL
@@ -42,7 +42,6 @@ module noc_arbiter_sva #(
         assume(!rst_n);
     end
 
-    // Keep reset asserted during the first formal cycle.
     always_ff @(posedge clk) begin
         if (!past_valid) begin
             assume(!rst_n);
@@ -51,12 +50,31 @@ module noc_arbiter_sva #(
     end
 
     // -------------------------------------------------------------------------
+    // Helper signals
+    // -------------------------------------------------------------------------
+
+    logic fire;
+
+    assign fire = out_valid && out_ready;
+
+    // Decode which VC is consumed by the current grant.
+    logic [NUM_VCS-1:0] grant_vc_decoded;
+
+    always_comb begin
+        grant_vc_decoded = '0;
+
+        if (fire) begin
+            grant_vc_decoded[grant_vc] = 1'b1;
+        end
+    end
+
+    // -------------------------------------------------------------------------
     // Environment assumptions
     // -------------------------------------------------------------------------
 
     // Requested VC must be legal.
-    // With NUM_VCS = 2 and VC_W = 1, this is naturally true, but this assumption
-    // keeps the property module scalable.
+    // With NUM_VCS = 2 and VC_W = 1, this is naturally true.
+    // This assumption keeps the property module parameter-scalable.
     generate
         genvar a_port;
         for (a_port = 0; a_port < NUM_PORTS; a_port++) begin : gen_req_vc_legal_assume
@@ -66,16 +84,24 @@ module noc_arbiter_sva #(
         end
     endgenerate
 
-    // Credit return must be legal.
-    // The environment cannot return credit to a VC that is already full unless
-    // the same cycle also consumes one credit from that VC.
+    // Credit return legality:
+    // The environment cannot return credit to a full VC unless the same cycle
+    // also consumes one credit from that same VC.
     //
-    // Phase 5 will make this tighter using explicit credit decrement reasoning.
+    // This is more precise than the Phase 4 assumption.
+    // Legal cases:
+    // - count < CREDIT_DEPTH and credit_return = 1
+    // - count == CREDIT_DEPTH, credit_return = 1, and same VC is also decremented
+    //
+    // Illegal case:
+    // - count == CREDIT_DEPTH, credit_return = 1, and no same-cycle decrement
     generate
         genvar a_vc;
         for (a_vc = 0; a_vc < NUM_VCS; a_vc++) begin : gen_credit_return_legal_assume
             always_ff @(posedge clk) begin
-                if (rst_n && credit_return[a_vc] && (credit_count_dbg[a_vc] == CREDIT_DEPTH)) begin
+                if (rst_n && credit_return[a_vc] &&
+                    (credit_count_dbg[a_vc] == CREDIT_DEPTH) &&
+                    !grant_vc_decoded[a_vc]) begin
                     assume(1'b0);
                 end
             end
@@ -133,8 +159,6 @@ module noc_arbiter_sva #(
     end
 
     // S4: No grant when output is not ready.
-    // This matches the current RTL architecture, where grant is issued only when
-    // a transfer can fire.
     always_ff @(posedge clk) begin
         if (rst_n && !out_ready) begin
             assert(grant == '0);
@@ -195,16 +219,127 @@ module noc_arbiter_sva #(
         end
     end
 
+    // S10: A grant can only happen when out_ready is high.
+    always_ff @(posedge clk) begin
+        if (rst_n && (|grant)) begin
+            assert(out_ready);
+        end
+    end
+
     // -------------------------------------------------------------------------
-    // Basic credit range safety
+    // Credit range safety
     // -------------------------------------------------------------------------
 
+    // C1/C2: Credit count must always stay between 0 and CREDIT_DEPTH.
+    // Since credit_count_dbg is unsigned, underflow manifests as wraparound above
+    // CREDIT_DEPTH. Therefore, the upper-bound assertion catches both overflow
+    // and underflow-wrap behavior.
     generate
         genvar cr_vc;
         for (cr_vc = 0; cr_vc < NUM_VCS; cr_vc++) begin : gen_credit_range_assert
             always_ff @(posedge clk) begin
                 if (rst_n) begin
                     assert(credit_count_dbg[cr_vc] <= CREDIT_DEPTH);
+                end
+            end
+        end
+    endgenerate
+
+    // -------------------------------------------------------------------------
+    // Phase 5 credit-accounting assertions
+    // -------------------------------------------------------------------------
+
+    // C3: Credit decrements by one when a VC is consumed and no credit returns
+    // for that VC in the same cycle.
+    generate
+        genvar dec_vc;
+        for (dec_vc = 0; dec_vc < NUM_VCS; dec_vc++) begin : gen_credit_decrement_assert
+            always_ff @(posedge clk) begin
+                if (past_valid && $past(rst_n) && rst_n) begin
+                    if ($past(grant_vc_decoded[dec_vc]) &&
+                        !$past(credit_return[dec_vc])) begin
+                        assert(credit_count_dbg[dec_vc] ==
+                               ($past(credit_count_dbg[dec_vc]) - 1'b1));
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // C4: Credit increments by one when a credit returns and no grant consumes
+    // that same VC in the same cycle.
+    generate
+        genvar inc_vc;
+        for (inc_vc = 0; inc_vc < NUM_VCS; inc_vc++) begin : gen_credit_increment_assert
+            always_ff @(posedge clk) begin
+                if (past_valid && $past(rst_n) && rst_n) begin
+                    if ($past(credit_return[inc_vc]) &&
+                        !$past(grant_vc_decoded[inc_vc])) begin
+                        assert(credit_count_dbg[inc_vc] ==
+                               ($past(credit_count_dbg[inc_vc]) + 1'b1));
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // C5: If credit return and credit consume happen for the same VC in the same
+    // cycle, the net available credit count remains unchanged.
+    generate
+        genvar same_vc;
+        for (same_vc = 0; same_vc < NUM_VCS; same_vc++) begin : gen_credit_inc_dec_same_cycle_assert
+            always_ff @(posedge clk) begin
+                if (past_valid && $past(rst_n) && rst_n) begin
+                    if ($past(credit_return[same_vc]) &&
+                        $past(grant_vc_decoded[same_vc])) begin
+                        assert(credit_count_dbg[same_vc] ==
+                               $past(credit_count_dbg[same_vc]));
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // C6: If neither credit return nor grant consume occurs for a VC, credit count
+    // must remain stable.
+    generate
+        genvar hold_vc;
+        for (hold_vc = 0; hold_vc < NUM_VCS; hold_vc++) begin : gen_credit_hold_assert
+            always_ff @(posedge clk) begin
+                if (past_valid && $past(rst_n) && rst_n) begin
+                    if (!$past(credit_return[hold_vc]) &&
+                        !$past(grant_vc_decoded[hold_vc])) begin
+                        assert(credit_count_dbg[hold_vc] ==
+                               $past(credit_count_dbg[hold_vc]));
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // C7: A VC at zero credit cannot be consumed.
+    generate
+        genvar zero_vc;
+        for (zero_vc = 0; zero_vc < NUM_VCS; zero_vc++) begin : gen_zero_credit_no_consume_assert
+            always_ff @(posedge clk) begin
+                if (rst_n && (credit_count_dbg[zero_vc] == '0)) begin
+                    assert(!grant_vc_decoded[zero_vc]);
+                end
+            end
+        end
+    endgenerate
+
+    // C8: If a VC is full, credit_return without same-cycle consume is illegal
+    // due to environment assumption. This assertion documents the expected
+    // safe behavior visible at the design boundary.
+    generate
+        genvar full_vc;
+        for (full_vc = 0; full_vc < NUM_VCS; full_vc++) begin : gen_full_credit_return_assert
+            always_ff @(posedge clk) begin
+                if (rst_n &&
+                    (credit_count_dbg[full_vc] == CREDIT_DEPTH) &&
+                    credit_return[full_vc]) begin
+                    assert(grant_vc_decoded[full_vc]);
                 end
             end
         end
@@ -220,23 +355,63 @@ module noc_arbiter_sva #(
         end
     end
 
+    // RR1: Pointer must remain stable if no fire occurred in the previous cycle.
+    always_ff @(posedge clk) begin
+        if (past_valid && $past(rst_n) && rst_n) begin
+            if (!$past(fire)) begin
+                assert(rr_ptr_dbg == $past(rr_ptr_dbg));
+            end
+        end
+    end
+
+    // RR2: Pointer should advance to granted port + 1 after a fire.
+    generate
+        genvar rr_port;
+        for (rr_port = 0; rr_port < NUM_PORTS; rr_port++) begin : gen_rr_ptr_update_assert
+            always_ff @(posedge clk) begin
+                if (past_valid && $past(rst_n) && rst_n) begin
+                    if ($past(fire) && $past(grant[rr_port])) begin
+                        if (rr_port == NUM_PORTS - 1) begin
+                            assert(rr_ptr_dbg == '0);
+                        end else begin
+                            assert(rr_ptr_dbg == rr_port + 1);
+                        end
+                    end
+                end
+            end
+        end
+    endgenerate
+
     // -------------------------------------------------------------------------
-    // Phase 4 cover sanity
+    // Phase 5 cover sanity
+    // More detailed cover properties will be added in Phase 7.
     // -------------------------------------------------------------------------
 
-    // Environment can leave reset.
     always_ff @(posedge clk) begin
         cover(rst_n);
     end
 
-    // At least one request can occur.
     always_ff @(posedge clk) begin
         cover(rst_n && out_ready && (|req));
     end
 
-    // At least one grant can occur.
     always_ff @(posedge clk) begin
         cover(rst_n && out_ready && (|req) && (|grant));
+    end
+
+    // See at least one credit decrement event.
+    always_ff @(posedge clk) begin
+        cover(rst_n && fire);
+    end
+
+    // See at least one credit return event.
+    always_ff @(posedge clk) begin
+        cover(rst_n && (|credit_return));
+    end
+
+    // See a simultaneous credit return and grant consume.
+    always_ff @(posedge clk) begin
+        cover(rst_n && fire && credit_return[grant_vc]);
     end
 
 `endif
