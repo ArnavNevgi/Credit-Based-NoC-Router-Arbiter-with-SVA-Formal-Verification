@@ -44,7 +44,20 @@ Detailed results are documented in:
 - `docs/counterexample_debug.md`
 - `regressions/formal/phase8_prove_log.txt`
 - `regressions/formal/phase8_cover_log.txt`
+  
+## Project Highlights
 
+- 4-input, 1-output credit-based arbitration model
+- 2 virtual channels with per-VC credit counters
+- Round-robin priority with pointer update after successful transfer
+- One-hot grant generation
+- Backpressure-aware grant behavior
+- SVA safety assertions
+- Credit underflow/overflow protection
+- Bounded no-starvation checks
+- Cover properties for grant rotation, credit depletion/return, pointer wraparound, and reset recovery
+- SymbiYosys/Yosys/SMTBMC proof and cover runs
+- Counterexample debug documentation
 ## Design Scope
 
 | Feature | Scope |
