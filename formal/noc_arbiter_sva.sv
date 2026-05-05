@@ -1,8 +1,8 @@
 // -----------------------------------------------------------------------------
 // File        : noc_arbiter_sva.sv
 // Project     : Credit-Based NoC Router Arbiter with SVA Formal Verification
-// Description : Basic formal assumptions and sanity assertions.
-// Phase       : Phase 3 - Initial formal harness checks.
+// Description : Safety assertions for credit-based NoC arbiter.
+// Phase       : Phase 4 - Core safety properties.
 // -----------------------------------------------------------------------------
 
 `timescale 1ns/1ps
@@ -19,7 +19,7 @@ module noc_arbiter_sva #(
     input logic                              rst_n,
 
     input logic [NUM_PORTS-1:0]              req,
-    input logic [NUM_PORTS-1:0][VC_W-1:0]    req_vc,
+    input var logic [NUM_PORTS-1:0][VC_W-1:0]    req_vc,
     input logic                              out_ready,
     input logic [NUM_VCS-1:0]                credit_return,
 
@@ -28,115 +28,215 @@ module noc_arbiter_sva #(
     input logic [VC_W-1:0]                   grant_vc,
 
     input logic [PORT_W-1:0]                 rr_ptr_dbg,
-    input logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg
+    input var logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg
 );
 
 `ifdef FORMAL
 
     // -------------------------------------------------------------------------
-    // Initial reset modeling
-    //
-    // The design starts in reset. This avoids meaningless initial states.
+    // Formal reset modeling
     // -------------------------------------------------------------------------
+    logic past_valid;
+
     initial begin
         assume(!rst_n);
     end
 
-    // Track whether reset has been released at least once.
-    logic past_valid;
-
-    always_ff @(posedge clk) begin
-        past_valid <= 1'b1;
-    end
-
-    // -------------------------------------------------------------------------
-    // Basic reset sequencing assumption
-    //
-    // Keep reset low in the first valid cycle, then allow formal to choose
-    // deassertion later.
-    // -------------------------------------------------------------------------
+    // Keep reset asserted during the first formal cycle.
     always_ff @(posedge clk) begin
         if (!past_valid) begin
             assume(!rst_n);
         end
+        past_valid <= 1'b1;
     end
 
     // -------------------------------------------------------------------------
-    // Basic environment assumptions
-    //
-    // In this project, req_vc is 1 bit because NUM_VCS = 2.
-    // Therefore, req_vc is naturally legal. This generate block keeps the
-    // assumption scalable if NUM_VCS changes later.
+    // Environment assumptions
     // -------------------------------------------------------------------------
+
+    // Requested VC must be legal.
+    // With NUM_VCS = 2 and VC_W = 1, this is naturally true, but this assumption
+    // keeps the property module scalable.
     generate
-        genvar i;
-        for (i = 0; i < NUM_PORTS; i++) begin : gen_req_vc_assumptions
+        genvar a_port;
+        for (a_port = 0; a_port < NUM_PORTS; a_port++) begin : gen_req_vc_legal_assume
             always_ff @(posedge clk) begin
-                assume(req_vc[i] < NUM_VCS);
+                assume(req_vc[a_port] < NUM_VCS);
             end
         end
     endgenerate
 
-    // -------------------------------------------------------------------------
-    // Credit return legality assumption
+    // Credit return must be legal.
+    // The environment cannot return credit to a VC that is already full unless
+    // the same cycle also consumes one credit from that VC.
     //
-    // The environment should not return credit to a VC that is already full.
-    // This models legal downstream buffer behavior.
-    // -------------------------------------------------------------------------
+    // Phase 5 will make this tighter using explicit credit decrement reasoning.
     generate
-        genvar vc;
-        for (vc = 0; vc < NUM_VCS; vc++) begin : gen_credit_return_assumptions
+        genvar a_vc;
+        for (a_vc = 0; a_vc < NUM_VCS; a_vc++) begin : gen_credit_return_legal_assume
             always_ff @(posedge clk) begin
-                if (rst_n && credit_return[vc]) begin
-                    assume(credit_count_dbg[vc] < CREDIT_DEPTH);
+                if (rst_n && credit_return[a_vc] && (credit_count_dbg[a_vc] == CREDIT_DEPTH)) begin
+                    assume(1'b0);
                 end
             end
         end
     endgenerate
 
     // -------------------------------------------------------------------------
-    // Phase 3 sanity assertions
-    //
-    // These are intentionally simple. Full safety properties are Phase 4.
+    // Reset safety assertions
     // -------------------------------------------------------------------------
 
-    // Reset should force no visible grant.
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             assert(grant == '0);
             assert(out_valid == 1'b0);
+            assert(grant_vc == '0);
             assert(rr_ptr_dbg == '0);
         end
     end
 
-    // Debug credit counters should stay in a representable legal range.
     generate
-        genvar c;
-        for (c = 0; c < NUM_VCS; c++) begin : gen_basic_credit_range_assertions
+        genvar r_vc;
+        for (r_vc = 0; r_vc < NUM_VCS; r_vc++) begin : gen_reset_credit_assert
             always_ff @(posedge clk) begin
-                if (rst_n) begin
-                    assert(credit_count_dbg[c] <= CREDIT_DEPTH);
+                if (!rst_n) begin
+                    assert(credit_count_dbg[r_vc] == CREDIT_DEPTH);
                 end
             end
         end
     endgenerate
 
-    // Grant vector should never contain unknown/multiple obvious invalid values.
-    // Full onehot0 proof will be added in Phase 4.
+    // -------------------------------------------------------------------------
+    // Grant safety assertions
+    // -------------------------------------------------------------------------
+
+    // S1: Grant must be one-hot or zero.
     always_ff @(posedge clk) begin
         if (rst_n) begin
-            assert(grant < (1 << NUM_PORTS));
+            assert($onehot0(grant));
         end
     end
 
-    // Basic cover: prove the environment can leave reset.
+    // S2: out_valid must match whether any grant is active.
+    always_ff @(posedge clk) begin
+        if (rst_n) begin
+            assert(out_valid == (|grant));
+        end
+    end
+
+    // S3: No grant when no request is active.
+    always_ff @(posedge clk) begin
+        if (rst_n && (req == '0)) begin
+            assert(grant == '0);
+            assert(out_valid == 1'b0);
+        end
+    end
+
+    // S4: No grant when output is not ready.
+    // This matches the current RTL architecture, where grant is issued only when
+    // a transfer can fire.
+    always_ff @(posedge clk) begin
+        if (rst_n && !out_ready) begin
+            assert(grant == '0);
+            assert(out_valid == 1'b0);
+        end
+    end
+
+    // S5: Each grant bit must imply the corresponding request bit.
+    generate
+        genvar g_port;
+        for (g_port = 0; g_port < NUM_PORTS; g_port++) begin : gen_grant_implies_req_assert
+            always_ff @(posedge clk) begin
+                if (rst_n && grant[g_port]) begin
+                    assert(req[g_port]);
+                end
+            end
+        end
+    endgenerate
+
+    // S6: Grant must imply available credit for the requested VC.
+    generate
+        genvar c_port;
+        for (c_port = 0; c_port < NUM_PORTS; c_port++) begin : gen_grant_implies_credit_assert
+            always_ff @(posedge clk) begin
+                if (rst_n && grant[c_port]) begin
+                    assert(credit_count_dbg[req_vc[c_port]] > 0);
+                end
+            end
+        end
+    endgenerate
+
+    // S7: grant_vc must match the VC requested by the granted port.
+    generate
+        genvar vc_port;
+        for (vc_port = 0; vc_port < NUM_PORTS; vc_port++) begin : gen_grant_vc_match_assert
+            always_ff @(posedge clk) begin
+                if (rst_n && grant[vc_port]) begin
+                    assert(grant_vc == req_vc[vc_port]);
+                end
+            end
+        end
+    endgenerate
+
+    // S8: If all credits are zero, there must be no grant.
+    always_ff @(posedge clk) begin
+        if (rst_n) begin
+            if ((credit_count_dbg[0] == '0) && (credit_count_dbg[1] == '0)) begin
+                assert(grant == '0);
+                assert(out_valid == 1'b0);
+            end
+        end
+    end
+
+    // S9: If there is a grant, the selected grant_vc must have nonzero credit.
+    always_ff @(posedge clk) begin
+        if (rst_n && out_valid) begin
+            assert(credit_count_dbg[grant_vc] > 0);
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Basic credit range safety
+    // -------------------------------------------------------------------------
+
+    generate
+        genvar cr_vc;
+        for (cr_vc = 0; cr_vc < NUM_VCS; cr_vc++) begin : gen_credit_range_assert
+            always_ff @(posedge clk) begin
+                if (rst_n) begin
+                    assert(credit_count_dbg[cr_vc] <= CREDIT_DEPTH);
+                end
+            end
+        end
+    endgenerate
+
+    // -------------------------------------------------------------------------
+    // Basic round-robin pointer range safety
+    // -------------------------------------------------------------------------
+
+    always_ff @(posedge clk) begin
+        if (rst_n) begin
+            assert(rr_ptr_dbg < NUM_PORTS);
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Phase 4 cover sanity
+    // -------------------------------------------------------------------------
+
+    // Environment can leave reset.
     always_ff @(posedge clk) begin
         cover(rst_n);
     end
 
-    // Basic cover: eventually see some request while out_ready is high.
+    // At least one request can occur.
     always_ff @(posedge clk) begin
         cover(rst_n && out_ready && (|req));
+    end
+
+    // At least one grant can occur.
+    always_ff @(posedge clk) begin
+        cover(rst_n && out_ready && (|req) && (|grant));
     end
 
 `endif

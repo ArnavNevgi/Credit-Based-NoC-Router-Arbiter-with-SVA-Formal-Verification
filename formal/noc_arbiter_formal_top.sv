@@ -2,7 +2,7 @@
 // File        : noc_arbiter_formal_top.sv
 // Project     : Credit-Based NoC Router Arbiter with SVA Formal Verification
 // Description : Formal harness for credit-based NoC arbiter.
-// Phase       : Phase 3 - Basic formal harness.
+// Phase       : Phase 4 - Safety assertion harness.
 // -----------------------------------------------------------------------------
 
 `timescale 1ns/1ps
@@ -30,18 +30,6 @@ module noc_arbiter_formal_top;
 
     logic [PORT_W-1:0]                 rr_ptr_dbg;
     logic [NUM_VCS-1:0][CREDIT_W-1:0]  credit_count_dbg;
-
-`ifdef FORMAL
-    // -------------------------------------------------------------------------
-    // Formal clock
-    //
-    // SymbiYosys/Yosys treats this as the formal clock event.
-    // The clock does not need a simulation-style toggling always block.
-    // -------------------------------------------------------------------------
-    always @(*) begin
-        assume(clk == 1'b1);
-    end
-`endif
 
     // -------------------------------------------------------------------------
     // DUT instance
